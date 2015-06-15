@@ -1,34 +1,47 @@
 describe('BookStorageManager()', function () {
     var bsm,
         storageDevice,
-        storageMock;
-        
+        storageMock,
+        referenceMgrSpy;
+
     before(function () {
-        storageDevice = { addNamed: function(blob, path) {} };
-        
-        bsm = new BookStorageManager({storageDevice: storageDevice});
+        storageDevice = {
+            addNamed: function (blob, path) {}
+        };
+        var referenceMgrStub = {
+            storeJSONReference: function () {}
+        };
+        referenceMgrSpy = sinon.spy(referenceMgrStub, 'storeJSONReference');
+        bsm = new BookStorageManager({
+            storageDevice: storageDevice,
+            referenceManager: referenceMgrStub
+        });
     });
-    
+
     beforeEach(function () {
         storageMock = sinon.mock(storageDevice);
+        referenceMgrSpy.reset();
     });
-        
+
     describe('#writeChapter()', function () {
-        it ('should generate chapter path via #getChapterFilePath and write to file system', function () {
+        it('should generate chapter path via #getChapterFilePath and write to file system', function () {
             storageMock.expects('addNamed').once().withExactArgs(WEB_RESP.audio_blob, 'librifox/1234/0.mp3');
-            bsm.writeChapter(WEB_RESP.audio_blob, 1234, 0);
+            bsm.writeChapter(WEB_RESP.audio_blob, BOOK_OBJECT, CHAPTER_OBJECT);
             storageMock.verify();
         });
-    });
-    
-    describe('#writeBook()', function () {
-        it('should generate book path via #getBookFilePath and write to file system', function () {
-            storageMock.expects('addNamed').once().withExactArgs(WEB_RESP.audio_blob, 'librifox/1234/full.zip');
-            bsm.writeBook(WEB_RESP.audio_blob, 1234);
-            storageMock.verify();
+        it('should call referenceManager#storeJSONReference with args', function () {
+            bsm.writeChapter(WEB_RESP.audio_blob, BOOK_OBJECT, CHAPTER_OBJECT);
+                        console.log(referenceMgrSpy.callCount);
+
+            expect(referenceMgrSpy.calledOnce).to.be.true;
+            expect(referenceMgrSpy.firstCall.calledWithExactly(
+                BOOK_OBJECT,
+                CHAPTER_OBJECT,
+                'librifox/1234/0.mp3'
+            )).to.be.true;
+
         });
     });
-    
     describe('#write()', function () {
         it('should write the specified object to the filesystem', function () {
             storageMock.expects('addNamed').once().withExactArgs(WEB_RESP.audio_blob, 'librifox/1234/01.mp3');
@@ -36,14 +49,10 @@ describe('BookStorageManager()', function () {
             storageMock.verify();
         });
     });
-    describe('#getBookFilePath()', function () { // should be moved to new object
-        it('should return the filepath of the book, based on id', function () {
-            expect(bsm.getBookFilePath(BOOK_OBJECT.id)).equal('librifox/1234/full.zip');
-        });
-    });
+
     describe('#getChapterFilePath()', function () {
         it('should return the filepath of the chapter, based on id', function () {
-            bsm.getChapterFilePath(BOOK_OBJECT);
+            expect(bsm.getChapterFilePath(1234, 2)).to.equal('librifox/1234/2.mp3');
         });
-    });
+    })
 });

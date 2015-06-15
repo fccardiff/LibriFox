@@ -1,7 +1,3 @@
-window.addEventListener('DOMContentLoaded', function () {
-    'use strict';
-    //var translate = navigator.mozL10n.get;
-});
 var bookCache = {};
 var httpRequestHandler = new HttpRequestHandler();
 
@@ -11,18 +7,17 @@ function stripHTMLTags(str) {
 
 function Book(args) {
     this.chapters = args.chapters;
-    
+
     var json = args.json;
     this.description = stripHTMLTags(json.description);
     this.title = stripHTMLTags(json.title);
     this.id = parseInt(json.id);
-    this.fullBookUrl = json.url_zip_file;
 }
 
 function Chapter(args) {
-    var title_regex = /^<!\[CDATA\[(.*)\]\]>$/;
-    var title_match = title_regex.exec(args.title);
-    this.title = stripHTMLTags(title_match[1] || args.title); // if regex doesn't match, fall back to raw string
+    var name_regex = /^<!\[CDATA\[(.*)\]\]>$/;
+    var name_match = name_regex.exec(args.name);
+    this.name = stripHTMLTags(name_match[1] || args.name); // if regex doesn't match, fall back to raw string
     this.index = args.index; // TODO: Add whenever this method is called, return current chapter or get it if not available
     this.url = args.url;
     this.position = 0;
@@ -47,36 +42,60 @@ var appUIState = new UIState({
 function ChaptersListPageGenerator(args) {
     var args = args || {};
     var httpRequestHandler = args.httpRequestHandler;
-    var list_selector     = args.list_selector;
-    var header_selector   = args.header_selector
+    var list_selector = args.list_selector;
+    var header_selector = args.header_selector;
+    var bookDownloadManager = args.bookDownloadManager;
 
     this.generatePage = function (book) {
         $(header_selector).text(book.title); // untested, TODO update tests
-        
+
         if (book.chapters) {
-            showLocalChapters(book.chapters);
+            showLocalChapters(book);
         } else {
             getChaptersFromFeed(book.id, function (chapters) {
                 book.chapters = chapters;
-                showLocalChapters(book.chapters);
+                showLocalChapters(book);
             });
         }
     };
 
-    function showLocalChapters(chapters) {
-        $.each(chapters, function (index, chapter) {
-            generateChapterListItem(chapter);
+    function showLocalChapters(book) {
+        $(list_selector).append($('<li/>', {
+            html: $('<a/>', {
+                text: 'Download all chapters (WIP)'
+            }),
+            click: function () {
+                book.chapters.forEach(function (chapter) {
+                    downloadChapterWithCbk(book,chapter);
+                });
+            }
+        }));
+        $.each(book.chapters, function (index, chapter) {
+            generateChapterListItem(book, chapter, this);
         });
         $(list_selector).listview('refresh');
     };
 
-    function generateChapterListItem(chapter) {
-        var chapterListItem = $('<li chapter-index=' + chapter.index + '><a href="book.html"><h2>' + chapter.title + '</h2></a></li>');
+    function generateChapterListItem(book, chapter) {
+        var chapterListItem = $('<li class="chapter-listing" chapter-index=' + chapter.index + '><a><h2>' + chapter.name + '</h2></a><div class="progressBar"><div class="progressBarSlider"></div></div></li>');
         chapterListItem.click(function () {
-            appUIState.setCurrentChapterByIndex($(this).attr("chapter-index"));
+            console.log(this);
+            downloadChapterWithCbk(book, chapter, this);
         });
         $(list_selector).append(chapterListItem);
     };
+    
+    function downloadChapterWithCbk(book, chapter, that) {
+        return bookDownloadManager.downloadChapter(
+            book,
+            chapter,
+            function (event) { // move this into a new object
+                if (event.lengthComputable) {
+                    var percentage = (event.loaded / event.total) * 100;
+                    $(that).find('.progressBarSlider').css('width', percentage + '%');
+                }
+            });
+    }
 
     function getChaptersFromFeed(book_id, callback_func) {
         httpRequestHandler.getXML("https://librivox.org/rss/" + encodeURIComponent(book_id), function (xhr) {
@@ -89,7 +108,7 @@ function ChaptersListPageGenerator(args) {
                 var $enclosure = $(element).find("enclosure");
                 var chapter = new Chapter({
                     'index': chapters.length,
-                    'title': $title.text(),
+                    'name': $title.text(),
                     'url': $enclosure.attr('url')
                 });
                 chapters.push(chapter);
@@ -99,11 +118,40 @@ function ChaptersListPageGenerator(args) {
     };
 }
 
-var chaptersListGen = new ChaptersListPageGenerator({
-    'httpRequestHandler': httpRequestHandler,
-    'list_selector': '#chaptersList',
-    'header_selector': '#chapterHeader'
-});
+function BookDownloadManager(args) {
+    var that = this;
+    var httpRequestHandler = args.httpRequestHandler;
+    var storageManager = args.storageManager;
+
+    function downloadFile(url, finished_callback, progress_callback) {
+        var req_progress_callback;
+        var additional_args = {};
+
+        if (progress_callback) {
+            additional_args.progress_callback = function () {
+                progress_callback.apply(this, arguments)
+            };
+        }
+
+        httpRequestHandler.getBlob(
+            url,
+            function (xhr) {
+                finished_callback(xhr.response);
+            },
+            additional_args);
+    }
+
+    this.downloadChapter = function (book_obj, chapter_obj, progress_callback) {
+        downloadFile(
+            chapter_obj.url,
+            function (response) {
+                storageManager.writeChapter(response, book_obj, chapter_obj);
+            },
+            progress_callback
+        );
+    }
+}
+
 $(document).on("pagecreate", "#chaptersListPage", function (event) {
     var selectedBook = appUIState.currentBook;
     if (!selectedBook) { // selectedBook is undefined if you refresh the app from WebIDE on a chapter list page
@@ -113,67 +161,19 @@ $(document).on("pagecreate", "#chaptersListPage", function (event) {
     chaptersListGen.generatePage(selectedBook);
 });
 
-function BookDownloadManager(args) {
-    var that = this;
-    var progressSelector = args.progressSelector;
-    var httpRequestHandler = args.httpRequestHandler;
-    var storageManager = args.storageManager;
-
-    function downloadFile(url, finished_callback) {
-        var req_progress_callback;
-        var additional_args = {};
-        if (progressSelector) {
-            req_progress_callback = function (event) {
-                if (event.lengthComputable) {
-                    var percentage = (event.loaded / event.total) * 100;
-                    $(progressSelector).css('width', percentage + '%');
-                }
-            };
-        }
-                
-        if (progressSelector) {
-            additional_args.progress_callback = function () { req_progress_callback.apply(this, arguments) };
-        }
-        
-        httpRequestHandler.getBlob(
-            url,
-            function (xhr) { finished_callback(xhr.response); }, 
-            additional_args);
-    }
-
-    this.downloadBook = function (book_obj) {
-        console.warn('#downloadBook called - this function will not work until we are able to unzip files.')
-        downloadFile(book_obj.fullBookUrl, function (response) {
-            storageManager.writeBook(response, book_obj.id);
-        });
-    }
-    this.downloadChapter = function (book_id, chapter_obj) {
-        downloadFile(chapter_obj.url, function (response) {
-            storageManager.writeChapter(response, book_id, chapter_obj.index);
-        });
-    }
+var lf_getDeviceStorage = function (storage_str) {
+    return navigator.getDeviceStorage && navigator.getDeviceStorage(storage_str || 'sdcard');
 }
 
-var bookStorageManager = new BookStorageManager({
-    storageDevice: navigator.getDeviceStorage && navigator.getDeviceStorage('sdcard')// when karma evals this code, #getDeviceStorage is undefined, causing tests to crash
-});
-var bookDownloadManager = new BookDownloadManager({
-    progressSelector: ".progressBarSlider",
-    httpRequestHandler: httpRequestHandler,
-    storageManager: bookStorageManager
-});
-
 function BookStorageManager(args) {
-    var that = this;
-    var storageDevice = args.storageDevice;
+    var that = this,
+        storageDevice = args.storageDevice,
+        referenceManager = args.referenceManager;
 
-    this.writeBook = function (blob, book_id) {
-        var bookPath = that.getBookFilePath(book_id);
-        that.write(blob, bookPath);
-    };
-    this.writeChapter = function (blob, book_id, chapter_index) {
-        var chPath = that.getChapterFilePath(book_id, chapter_index);
+    this.writeChapter = function (blob, book_obj, chapter_obj) {
+        var chPath = that.getChapterFilePath(book_obj.id, chapter_obj.index);
         that.write(blob, chPath);
+        referenceManager.storeJSONReference(book_obj, chapter_obj, chPath);
     };
 
     this.write = function (blob, path) { // should be moved to different object
@@ -184,13 +184,170 @@ function BookStorageManager(args) {
             };
         }
     };
-    this.getBookFilePath = function (book_id) {
-        return 'librifox/' + book_id + '/full.zip'; // will not work until we set up fullbook unzip.
-    };
+
     this.getChapterFilePath = function (book_id, chapter_index) {
         return 'librifox/' + book_id + '/' + chapter_index + '.mp3';
     };
 }
+
+function BookReferenceManager(args) {
+    var args = args || {},
+        local_storage = args.localStorage || localStorage,
+        that = this;
+    this.JSON_PREFIX = 'bookid_';
+
+    this.storeJSONReference = function (book_obj, chapter_obj, path) {
+        if (!isValidIndex(book_obj.id)) {
+            throw new Error('book_obj.id is not a valid index: ' + book_obj.id);
+        }
+        var obj = that.loadJSONReference(book_obj.id);
+        if (!obj) {
+            obj = {
+                title: book_obj.title
+            };
+        }
+        if (!isValidIndex(chapter_obj.index)) {
+            throw new Error('chapter_obj.index is not a valid index: ' + chapter_obj.index);
+        }
+        obj[chapter_obj.index] = {
+            path: path,
+            name: chapter_obj.name
+        };
+        local_storage.setItem(that.JSON_PREFIX + book_obj.id, JSON.stringify(obj));
+    };
+
+    this.loadJSONReference = function (book_id) {
+        var book_ref = JSON.parse(local_storage.getItem(that.JSON_PREFIX + book_id));
+        return book_ref && applyHelperFunctions(book_ref);
+    };
+
+    this.eachReference = function (each_fn) {
+        Object.keys(local_storage).forEach(function (key) {
+            console.log(key);
+            if (key.startsWith(that.JSON_PREFIX) && local_storage.hasOwnProperty(key)) {
+                var book_ref = JSON.parse(local_storage.getItem(key));
+                applyHelperFunctions(book_ref);
+                each_fn(book_ref);
+            }
+        });
+    };
+
+    function applyHelperFunctions(book_ref) {
+        book_ref.eachChapter = function (each_fn) {
+            Object.keys(book_ref).forEach(function (key) {
+                if (isValidIndex(key) && book_ref.hasOwnProperty(key)) {
+                    each_fn(book_ref[key], key);
+                }
+            });
+        };
+        return book_ref;
+    }
+
+    function isValidIndex(index) {
+        return /^\d+$/.test(index)
+    }
+}
+var bookReferenceManager = new BookReferenceManager(),
+    bookStorageManager = new BookStorageManager({
+        storageDevice: lf_getDeviceStorage(),
+        referenceManager: bookReferenceManager
+    }),
+    bookDownloadManager = new BookDownloadManager({
+        httpRequestHandler: httpRequestHandler,
+        storageManager: bookStorageManager
+    }),
+    chaptersListGen = new ChaptersListPageGenerator({
+        'httpRequestHandler': httpRequestHandler,
+        'list_selector': '#chaptersList',
+        'header_selector': '#chapterHeader',
+        'bookDownloadManager': bookDownloadManager
+    });
+
+function StoredBooksPageGenerator(args) {
+    var that = this,
+        referenceManager = args.bookReferenceManager,
+        ui_state = args.ui_state;
+
+    this.registerEvents = function (selectors) {
+        if (!selectors.page) {
+            console.warn('Selectors.page is falsy (undefined?), this causes the page event to be registered for all pages');
+        }
+        $(document).on('pageshow', selectors.page, function () {
+            console.log('pageshow called for ' + selectors.page);
+            var $list = $(selectors.list);
+            $list.children('li.stored-book').remove();
+            referenceManager.eachReference(function (obj) {
+                var link = $('<a/>', {
+                    class: 'showFullText',
+                    text: obj.title,
+                    href: 'stored_chapters.html',
+                    click: function () {
+                        ui_state.ref = obj
+                    }
+                });
+                $('<li/>', {
+                    class: 'stored-book',
+                    html: link
+                }).appendTo($list);
+            });
+            $list.listview('refresh');
+        });
+
+
+    };
+}
+
+function StoredChaptersPageGenerator(args) {
+    var that = this,
+        ui_state = args.ui_state;
+
+    this.registerEvents = function (selectors) {
+        if (!selectors.page) {
+            console.warn('Selectors.page is falsy (undefined?), this causes the page event to be registered for all pages');
+        }
+        $(document).on('pageshow', selectors.page, function () {
+            console.log('storedChapters shown');
+            $(selectors.header_title).text(ui_state.ref.title);
+            var $list = $(selectors.list);
+            $list.children('li.stored-chapter').remove();
+            ui_state.ref.eachChapter(function (chapter_ref) {
+                var link = $('<a/>', {
+                    class: 'showFullText',
+                    text: chapter_ref.name,
+                    click: function () {
+                        alert('path on filesystem is ' + chapter_ref.path);
+                    }
+                });
+                $('<li/>', {
+                    class: 'stored-chapter',
+                    html: link
+                }).appendTo($list);
+            });
+            $list.listview('refresh');
+        });
+    }
+}
+
+
+
+var ui_state = {},
+    storedBooksPageGenerator = new StoredBooksPageGenerator({
+        bookReferenceManager: bookReferenceManager,
+        ui_state: ui_state
+    }),
+    storedChaptersPageGenerator = new StoredChaptersPageGenerator({
+        ui_state: ui_state
+    });
+
+storedBooksPageGenerator.registerEvents({
+    list: '#stored-books-list',
+    page: '#storedBooks'
+});
+storedChaptersPageGenerator.registerEvents({
+    header_title: '.chapter-title',
+    list: '#stored-chapters-list',
+    page: '#storedChapters'
+});
 
 function BookPlayerPageGenerator(args) {
     var args = args || {};
@@ -202,16 +359,12 @@ function BookPlayerPageGenerator(args) {
     var bookDownloadManager = args.bookDownloadManager;
 
     this.generatePage = function (page_args) {
-        var page_args = page_args || {}; // how should null args be handled? Is it better to do this, or to fail loudly?
+        var page_args = page_args;
         var book_obj = page_args.book;
         var chapter_obj = page_args.chapter;
 
-        $(dlFullBook).click(function () {
-            bookDownloadManager.downloadBook(book_obj); // doesn't work
-        });
-
         $(dlChapter).click(function () {
-            bookDownloadManager.downloadChapter(book_obj.id, chapter_obj);
+            bookDownloadManager.downloadChapter(book_obj, chapter_obj);
         });
 
         $(audioSource).prop("src", chapter_obj.url);
@@ -239,10 +392,10 @@ $(document).on("pagecreate", "#homeBook", function (event) {
     bookPlayerPageGenerator.generatePage({
         book: appUIState.currentBook,
         chapter: appUIState.currentChapter
-    }); // is this formatting style better or worse than the regular way?
+    });
 });
 
-var fileManager = new FileManager();
+var fileManager = new FileManager(lf_getDeviceStorage());
 $(document).on("pagecreate", "#homeFileManager", function () {
     $('#deleteAll').click(function () {
         fileManager.deleteAllAppFiles();
@@ -250,13 +403,12 @@ $(document).on("pagecreate", "#homeFileManager", function () {
     fileManager.displayAppFiles();
 });
 
-function FileManager () {
+function FileManager(storage_device) {
     var that = this;
-    
+
     this.displayAppFiles = function () {
-        var sdcard = navigator.getDeviceStorage('sdcard');
         var times_called = 0;
-        var enumeration_cb = function(result) {
+        var enumeration_cb = function (result) {
             times_called++;
             fileListItem = $('<li>' + result.name + '</li>');
             $("#downloadedFiles").append(fileListItem);
@@ -271,21 +423,19 @@ function FileManager () {
 
         $("#downloadedFiles").empty();
         that.enumerateFiles({
-            storage: sdcard,
             match: /librifox\/.*/,
             func_each: enumeration_cb,
             func_done: done_cb
         });
     }
 
-    this.enumerateFiles = function(args) {
-        var storage = args.storage,
-            match = args.match,
+    this.enumerateFiles = function (args) {
+        var match = args.match,
             func_each = args.func_each,
             func_done = args.func_done,
             func_error = args.func_error;
 
-        var request = storage.enumerate();
+        var request = storage_device.enumerate();
         request.onsuccess = function () {
             if (this.result) {
                 if (this.result.name.match(match)) {
@@ -300,49 +450,66 @@ function FileManager () {
             }
         };
         request.onerror = function () {
-            func_error && func_error(); // does this work?
+            func_error && func_error();
         };
-    }
+    };
 
     this.deleteAllAppFiles = function () {
-        var sdcard = navigator.getDeviceStorage('sdcard');
         var enumeration_cb = function (result) {
             console.log(result.name + ' will be deleted');
-            sdcard.delete(result.name);
+            storage_device.delete(result.name);
         }
         that.enumerateFiles({
-            storage: sdcard,
             match: /librifox\/.*/,
             func_each: enumeration_cb,
-            func_done: function () {that.displayAppFiles();}
+            func_done: function () {
+                that.displayAppFiles();
+            }
         });
     }
 }
 
 function SearchResltsPageGenerator(args) {
-    var args = args || {};
-    var httpRequestHandler = args.httpRequestHandler;
-    var selector = args.selector; // #booksList
+    var httpRequestHandler = args.httpRequestHandler,
+        results_selector = args.results_selector,
+        that = this;
+    if (!results_selector) {
+        console.warn('results_selector is undefined');
+    }
 
-    this.generatePage = function (search_string) {
-        clearResultsElement();
+    this.registerEvents = function (selectors) {
+        $(document).on("pagecreate", selectors.page, function (event) {
+            $(selectors.form).submit(function (event) {
+                $(results_selector).empty();
+                var input = $(selectors.search).val();
+                that.displayResults(input);
+                return false;
+            });
+        });
+    }
+
+    this.displayResults = function (search_string) {
+        $(results_selector).empty();
         getSearchJSON(search_string, function (books) {
             if (books) {
                 books.forEach(function (book_entry) {
                     var book = new Book({
                         'json': book_entry
                     });
-                    bookCache[book.id] = book; // this ends up storing id 3 times (as key, in book object, and in book object json)
-                    bookListItem = $('<li book-id="' + book.id + '"><a href="chapters.html"><h2>' + book.title + '</h2><p>' + book.description + '</p></a></li>');
+                    bookCache[book.id] = book;
+                    bookListItem = $('<li book-id="' + book.id + '"><a href="chapters.html"><h2>' + book.title + '</h2><p>' + book.description + '</p></a></li>'); //TODO remove injection vulnerability
                     bookListItem.click(function () {
                         appUIState.setCurrentBookById($(this).attr("book-id"));
                     });
-                    $(selector).append(bookListItem);
+                    $(results_selector).append(bookListItem);
                 });
-                $(selector).listview('refresh');
+                $(results_selector).listview('refresh');
             } else {
-                $(selector).append('<p id="noAvailableBooks">No books found, try simplifying your search.<br/>' +
-                    'The LibriVox search API is not very good, so we apologize for the inconvenience.</p>');
+                $(results_selector).append(
+                    '<p class="noAvailableBooks">' +
+                    'No books found, try simplifying your search.<br/>' +
+                    'The LibriVox search API is not very good, so we' +
+                    'apologize for the inconvenience.</p>');
             }
         });
     }
@@ -356,22 +523,16 @@ function SearchResltsPageGenerator(args) {
     function generateBookUrl(search_string) { // this should be private, but I want to test it :(
         return "https://librivox.org/api/feed/audiobooks/title/^" + encodeURIComponent(search_string) + "?&format=json";
     }
-
-    function clearResultsElement() {
-        $(selector).empty();
-    }
 }
 var searchResultsPageGenerator =
     new SearchResltsPageGenerator({
         'httpRequestHandler': httpRequestHandler,
-        'selector': '#booksList'
+        'results_selector': '#results-listing'
     });
-
-$("#newSearch").submit(function (event) {
-    $("#booksList").empty();
-    var input = $("#bookSearch").val();
-    searchResultsPageGenerator.generatePage(input);
-    return false;
+searchResultsPageGenerator.registerEvents({
+    page: "#bookSearch",
+    form: "#search-form",
+    search: "#books-search-bar"
 });
 
 function HttpRequestHandler() {
@@ -405,7 +566,6 @@ function HttpRequestHandler() {
             xhr.addEventListener('timeout', other_args.timeout_callback);
             xhr.addEventListener('progress', other_args.progress_callback);
             //  xhr.upload.addEventListener("load", transferComplete, false);
-            //  xhr.upload.addEventListener("error", transferFailed, false);
             //  xhr.upload.addEventListener("abort", transferCanceled, false);
             xhr.open('GET', url);
             if (type != 'default') {
